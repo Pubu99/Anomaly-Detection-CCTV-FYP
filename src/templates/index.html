@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Anomaly Detection</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 20px;
+        background: #111;
+        color: #eee;
+      }
+      .container {
+        max-width: 800px;
+        margin: auto;
+      }
+      video {
+        width: 100%;
+        border: 2px solid #444;
+        background: #000;
+      }
+      #confidence-bars {
+        margin-top: 10px;
+        display: flex;
+        gap: 15px;
+      }
+      .bar {
+        background: #444;
+        border-radius: 5px;
+        padding: 5px 10px;
+        flex: 1;
+        position: relative;
+        color: #eee;
+        font-weight: bold;
+        user-select: none;
+      }
+      .bar-fill {
+        background: #e74c3c;
+        height: 20px;
+        border-radius: 5px;
+        width: 0%;
+        transition: width 0.3s ease;
+      }
+      #anomaly-log {
+        margin-top: 20px;
+        background: #222;
+        padding: 10px;
+        max-height: 180px;
+        overflow-y: auto;
+        font-family: monospace;
+        white-space: pre-wrap;
+        border-radius: 6px;
+      }
+      #heatmap-overlay {
+        position: absolute;
+        top: 0;
+        left: 0;
+        pointer-events: none;
+        width: 640px;
+        height: 480px;
+        opacity: 0.4;
+        mix-blend-mode: overlay;
+        display: none;
+      }
+      .controls {
+        margin-bottom: 10px;
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      label {
+        cursor: pointer;
+      }
+      input[type="file"] {
+        display: none;
+      }
+      .btn {
+        background: #444;
+        color: #eee;
+        border: none;
+        padding: 8px 14px;
+        border-radius: 5px;
+        cursor: pointer;
+        transition: background 0.2s ease;
+      }
+      .btn:hover:enabled {
+        background: #e74c3c;
+      }
+      .btn:disabled {
+        background: #222;
+        cursor: not-allowed;
+        color: #666;
+      }
+      #status-msg {
+        margin-top: 10px;
+        font-style: italic;
+        min-height: 1.2em;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Anomaly Detection CCTV</h1>
+
+      <div class="controls">
+        <label class="btn" for="file-upload">Upload Video</label>
+        <input id="file-upload" type="file" accept="video/*" />
+        <button id="webcam-toggle" class="btn">
+          Use Webcam (Not implemented)
+        </button>
+        <button id="detect-btn" class="btn" disabled>Detect</button>
+      </div>
+
+      <div style="position: relative">
+        <video id="video-player" controls autoplay muted></video>
+        <canvas id="heatmap-overlay"></canvas>
+      </div>
+
+      <div id="status-msg"></div>
+
+      <div id="confidence-bars"></div>
+
+      <h3>Anomaly Log (Time-synced):</h3>
+      <pre id="anomaly-log">No anomalies detected yet.</pre>
+    </div>
+
+    <script>
+      const videoPlayer = document.getElementById("video-player");
+      const fileInput = document.getElementById("file-upload");
+      const detectBtn = document.getElementById("detect-btn");
+      const confidenceBars = document.getElementById("confidence-bars");
+      const anomalyLog = document.getElementById("anomaly-log");
+      const statusMsg = document.getElementById("status-msg");
+
+      let uploadedFilename = null;
+      let pollInterval = null;
+
+      // Initialize confidence bars (3 bars)
+      const topK = 3;
+      for (let i = 0; i < topK; i++) {
+        const bar = document.createElement("div");
+        bar.className = "bar";
+        bar.innerHTML = `<div class="bar-fill" id="bar-fill-${i}"></div><div id="bar-label-${i}">N/A</div>`;
+        confidenceBars.appendChild(bar);
+      }
+
+      function setStatus(msg) {
+        statusMsg.textContent = msg;
+      }
+
+      function updateConfidenceBars(topkData) {
+        for (let i = 0; i < topK; i++) {
+          const fill = document.getElementById(`bar-fill-${i}`);
+          const label = document.getElementById(`bar-label-${i}`);
+          if (topkData && topkData[i]) {
+            fill.style.width = `${topkData[i].confidence * 100}%`;
+            fill.style.backgroundColor =
+              topkData[i].confidence > 0.5 ? "#e74c3c" : "#3498db";
+            label.textContent = `${topkData[i].class} (${(
+              topkData[i].confidence * 100
+            ).toFixed(1)}%)`;
+          } else {
+            fill.style.width = "0%";
+            label.textContent = "N/A";
+          }
+        }
+      }
+
+      function updateAnomalyLog(logEntries) {
+        if (!logEntries || logEntries.length === 0) {
+          anomalyLog.textContent = "No anomalies detected yet.";
+        } else {
+          anomalyLog.textContent = logEntries.join("\n");
+        }
+      }
+
+      fileInput.onchange = () => {
+        const file = fileInput.files[0];
+        if (!file) return;
+        uploadedFilename = null;
+
+        const url = URL.createObjectURL(file);
+        videoPlayer.src = url;
+        detectBtn.disabled = false;
+        setStatus("Video loaded, ready for detection.");
+        updateConfidenceBars([]);
+        updateAnomalyLog([]);
+      };
+
+      detectBtn.onclick = async () => {
+        if (!fileInput.files[0]) {
+          alert("Please upload a video first.");
+          return;
+        }
+
+        detectBtn.disabled = true;
+        setStatus("Uploading video and starting detection...");
+
+        // Upload video
+        const formData = new FormData();
+        formData.append("file", fileInput.files[0]);
+        const res = await fetch("/upload", {
+          method: "POST",
+          body: formData,
+        });
+
+        if (!res.ok) {
+          const err = await res.json();
+          setStatus(`Error: ${err.message || err.error || "Upload failed"}`);
+          detectBtn.disabled = false;
+          return;
+        }
+
+        const data = await res.json();
+        if (data.status !== "started") {
+          setStatus("Unexpected server response.");
+          detectBtn.disabled = false;
+          return;
+        }
+
+        uploadedFilename = data.filename;
+        setStatus("Processing video...");
+
+        // Start polling status
+        pollInterval = setInterval(async () => {
+          const statusRes = await fetch("/status");
+          if (!statusRes.ok) return;
+          const statusData = await statusRes.json();
+
+          updateConfidenceBars(
+            statusData.topk_classes && statusData.topk_confidences
+              ? statusData.topk_classes.map((cls, i) => ({
+                  class: cls,
+                  confidence: statusData.topk_confidences[i],
+                }))
+              : []
+          );
+
+          updateAnomalyLog(statusData.log);
+
+          if (!statusData.processing && statusData.output_video) {
+            setStatus("Detection complete. Showing output video.");
+            clearInterval(pollInterval);
+            videoPlayer.src = `/video/${statusData.output_video}`;
+            detectBtn.disabled = false;
+          } else if (statusData.processing) {
+            setStatus("Processing video...");
+          }
+        }, 2000);
+      };
+    </script>
+  </body>
+</html>

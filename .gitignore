@@ -18,7 +18,6 @@ runs/
 outputs/
 
 # Data
-data
 data/data/raw/
 data/train/
 data/val/
@@ -36,3 +35,5 @@ Thumbs.db
 
 # Misc
 *.swp
+
+static/
